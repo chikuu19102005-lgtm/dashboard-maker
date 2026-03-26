@@ -5,18 +5,38 @@ from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
+import plotly.express as px
 import plotly.io as pio
 import streamlit as st
 
 from chart_ai import build_dashboard_charts
+from dashboard_filters import apply_output_filters, detect_output_filter_config, sync_output_filter_state
 from dataset_engine import analyze_dataset
-from explanation_engine import explain_all_charts, generate_trend_insights, prepare_analysis_frame
-from query_utils import build_fallback_sql, detect_query_type, extract_sql
+from explanation_engine import (
+    answer_analysis_question,
+    explain_all_charts,
+    generate_strategic_insights,
+    generate_trend_insights,
+    prepare_analysis_frame,
+    summarize_all_charts,
+)
+from language_engine import (
+    bilingual_list,
+    bilingual_text,
+    detect_input_language,
+    translate_question_to_english,
+)
+from query_utils import (
+    build_fallback_sql,
+    detect_query_type,
+    extract_sql,
+    validate_question_columns,
+)
 from sql_engine import generate_sql, repair_sql
 from sql_runner import SQLValidationError, run_sql
 
 
-st.set_page_config(page_title="AI Buisness Dashboard", layout="wide")
+st.set_page_config(page_title="AI Business Dashboard", layout="wide")
 
 
 DEFAULT_DATASET_PATH = Path(
@@ -26,9 +46,50 @@ DEFAULT_DATASET_PATH = Path(
 
 def apply_ui_theme(theme_mode="Light"):
     is_dark = str(theme_mode).lower() == "dark"
-    title_color = "#dbeafe" if is_dark else "#0b2a6b"
-    text_color = "#e5e7eb" if is_dark else "#0f172a"
+    title_color = "#f8fafc" if is_dark else "#0b2a6b"
+    text_color = "#f8fafc" if is_dark else "#0f172a"
     muted_color = "#94a3b8" if is_dark else "#64748b"
+    body_text_color = "#e2e8f0" if is_dark else "#0f172a"
+    sidebar_bg = (
+        "linear-gradient(180deg, #0f172a 0%, #111827 100%)"
+        if is_dark
+        else "linear-gradient(180deg, #f8fafc 0%, #eef2ff 100%)"
+    )
+    sidebar_text = "#e5e7eb" if is_dark else "#0f172a"
+    sidebar_border = "rgba(255,255,255,0.10)" if is_dark else "rgba(15,23,42,0.12)"
+    metric_bg = (
+        "linear-gradient(160deg, rgba(15,23,42,0.96) 0%, rgba(30,41,59,0.94) 100%)"
+        if is_dark
+        else "linear-gradient(160deg, #ffffff 0%, #f7faff 100%)"
+    )
+    metric_border = "rgba(71,85,105,0.55)" if is_dark else "#cbd5e1"
+    metric_label_text = "#94a3b8" if is_dark else "#64748b"
+    metric_value_text = "#f8fafc" if is_dark else "#111827"
+    input_label_text = "#cbd5e1" if is_dark else "#1f2937"
+    surface_bg = "rgba(15,23,42,0.56)" if is_dark else "rgba(255, 255, 255, 0.98)"
+    surface_border = "rgba(71,85,105,0.55)" if is_dark else "#cbd5e1"
+    plot_bg = "rgba(15,23,42,0.48)" if is_dark else "rgba(255, 255, 255, 0.98)"
+    plot_border = "rgba(71,85,105,0.55)" if is_dark else "#cbd5e1"
+    process_card_bg = "rgba(15,23,42,0.44)" if is_dark else "rgba(255,255,255,0.68)"
+    process_card_border = "rgba(71,85,105,0.38)" if is_dark else "rgba(148,163,184,0.22)"
+    input_bg = (
+        "linear-gradient(135deg, #1e293b 0%, #334155 50%, #475569 100%)"
+        if is_dark
+        else "linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)"
+    )
+    input_border = "rgba(148,163,184,0.55)" if is_dark else "rgba(15,23,42,0.18)"
+    input_text = "#f8fafc" if is_dark else "#0f172a"
+    input_placeholder = "rgba(226,232,240,0.85)" if is_dark else "rgba(15,23,42,0.52)"
+    input_focus_border = "#93c5fd" if is_dark else "#1d4ed8"
+    input_focus_shadow = (
+        "0 0 0 3px rgba(147, 197, 253, 0.25), 0 10px 24px rgba(71, 85, 105, 0.30)"
+        if is_dark
+        else "0 0 0 3px rgba(29, 78, 216, 0.18), 0 10px 24px rgba(148, 163, 184, 0.25)"
+    )
+    profile_card_bg = "rgba(15,23,42,0.62)" if is_dark else "rgba(255,255,255,0.70)"
+    profile_card_border = "rgba(148,163,184,0.34)" if is_dark else "rgba(148,163,184,0.24)"
+    chip_bg = "rgba(30,41,59,0.72)" if is_dark else "rgba(255,255,255,0.72)"
+    chip_border = "rgba(148,163,184,0.42)" if is_dark else "rgba(148,163,184,0.28)"
     app_bg = (
         """
                 radial-gradient(circle at 8% 10%, rgba(59, 130, 246, 0.30), transparent 20%),
@@ -63,8 +124,8 @@ def apply_ui_theme(theme_mode="Light"):
                 linear-gradient(180deg, #f2f5ff 0%, #e8eefb 100%);
         """
     )
-    glass_bg = "rgba(15,23,42,0.45)" if is_dark else "rgba(255,255,255,0.72)"
-    glass_border = "rgba(148,163,184,0.35)" if is_dark else "rgba(203,213,225,0.88)"
+    glass_bg = "rgba(15,23,42,0.74)" if is_dark else "rgba(255,255,255,0.72)"
+    glass_border = "rgba(148,163,184,0.34)" if is_dark else "rgba(203,213,225,0.88)"
 
     css = """
         <style>
@@ -82,30 +143,76 @@ def apply_ui_theme(theme_mode="Light"):
             max-width: 1320px;
         }
         [data-testid="stSidebar"] {
-            background: linear-gradient(180deg, #0f172a 0%, #111827 100%);
-            border-right: 1px solid rgba(255,255,255,0.1);
+            background: __SIDEBAR_BG__;
+            border-right: 1px solid __SIDEBAR_BORDER__;
         }
         [data-testid="stSidebar"] * {
-            color: #e5e7eb !important;
+            color: __SIDEBAR_TEXT__ !important;
         }
         [data-testid="stSidebar"] .stAlert {
             background: rgba(255,255,255,0.08) !important;
         }
         h1, h2, h3 {
             letter-spacing: -0.02em;
-            color: __TEXT_COLOR__;
+            color: __TEXT_COLOR__ !important;
+        }
+        h4, h5, h6 {
+            color: __TEXT_COLOR__ !important;
+        }
+        .main .block-container [data-testid="stMarkdownContainer"] h1,
+        .main .block-container [data-testid="stMarkdownContainer"] h2,
+        .main .block-container [data-testid="stMarkdownContainer"] h3,
+        .main .block-container [data-testid="stMarkdownContainer"] h4,
+        .main .block-container [data-testid="stMarkdownContainer"] h5,
+        .main .block-container [data-testid="stMarkdownContainer"] h6,
+        .main .block-container [data-testid="stHeadingWithActionElements"] h1,
+        .main .block-container [data-testid="stHeadingWithActionElements"] h2,
+        .main .block-container [data-testid="stHeadingWithActionElements"] h3,
+        .main .block-container [data-testid="stHeadingWithActionElements"] h4,
+        .main .block-container [data-testid="stHeadingWithActionElements"] h5,
+        .main .block-container [data-testid="stHeadingWithActionElements"] h6 {
+            color: __TEXT_COLOR__ !important;
+        }
+        .main .block-container,
+        .main .block-container label,
+        .main .block-container [data-testid="stMarkdownContainer"],
+        .main .block-container [data-testid="stMarkdownContainer"] p,
+        .main .block-container [data-testid="stMarkdownContainer"] li,
+        .main .block-container [data-testid="stMarkdownContainer"] span,
+        .main .block-container .stAlert,
+        .main .block-container .stInfo,
+        .main .block-container .stSuccess,
+        .main .block-container .stWarning,
+        .main .block-container .stError {
+            color: __BODY_TEXT_COLOR__;
         }
         .hero-title {
             font-size: 3rem;
             line-height: 1.1;
             font-weight: 800;
-            color: __TITLE_COLOR__;
+            color: __TITLE_COLOR__ !important;
             letter-spacing: -0.02em;
             margin: 0 0 8px 0;
         }
+        .main .block-container [data-testid="stMarkdownContainer"] p,
+        .main .block-container [data-testid="stMarkdownContainer"] li,
+        .main .block-container [data-testid="stMarkdownContainer"] * ,
+        .main .block-container p,
+        .main .block-container li,
+        .main .block-container span,
+        .main .block-container .process-copy,
+        .main .block-container .profile-sub,
+        .main .block-container .chip,
+        .main .block-container .kpi-label {
+            color: __BODY_TEXT_COLOR__ !important;
+        }
+        .main .block-container strong,
+        .main .block-container b {
+            color: __TEXT_COLOR__;
+        }
         [data-testid="stMetric"] {
-            background: linear-gradient(160deg, #ffffff 0%, #f7faff 100%);
-            border: 1.5px solid #cbd5e1;
+            background: __METRIC_BG__;
+            border: 1.5px solid __METRIC_BORDER__;
             border-radius: 16px;
             padding: 12px 16px;
             box-shadow: 0 12px 28px rgba(15, 23, 42, 0.12);
@@ -140,11 +247,11 @@ def apply_ui_theme(theme_mode="Light"):
             margin-right: 8px;
         }
         [data-testid="stMetricLabel"] p {
-            color: #64748b;
+            color: __METRIC_LABEL_TEXT__;
             font-weight: 700;
         }
         [data-testid="stMetricValue"] {
-            color: #111827;
+            color: __METRIC_VALUE_TEXT__;
             font-weight: 800;
         }
         .stButton > button[kind="primary"],
@@ -172,37 +279,136 @@ def apply_ui_theme(theme_mode="Light"):
         }
         .stTextInput > div > div > input {
             border-radius: 14px;
-            border: 1px solid rgba(255, 255, 255, 0.35);
-            background: linear-gradient(135deg, #3f3e8a 0%, #4a4fb3 45%, #5864d8 100%);
-            color: #f8fafc;
+            border: 1px solid __INPUT_BORDER__;
+            background: __INPUT_BG__;
+            color: __INPUT_TEXT__;
             font-weight: 600;
             padding-left: 12px;
-            box-shadow: 0 8px 22px rgba(58, 58, 150, 0.28);
+            box-shadow: 0 8px 22px rgba(15, 23, 42, 0.18);
         }
         .stTextInput > div > div > input::placeholder {
-            color: rgba(241, 245, 249, 0.86);
+            color: __INPUT_PLACEHOLDER__;
         }
         .stTextInput > div > div > input:focus {
-            border-color: #93c5fd;
-            box-shadow: 0 0 0 3px rgba(147, 197, 253, 0.25), 0 10px 24px rgba(88, 100, 216, 0.35);
+            border-color: __INPUT_FOCUS_BORDER__;
+            box-shadow: __INPUT_FOCUS_SHADOW__;
         }
         [data-testid="stTextInput"] label p {
-            color: #1f2937;
+            color: __INPUT_LABEL_TEXT__;
             font-weight: 700;
         }
         .stDataFrame, .stCodeBlock {
-            border: 1.5px solid #cbd5e1;
+            border: 1.5px solid __SURFACE_BORDER__;
             border-radius: 12px;
             overflow: hidden;
-            background: rgba(255, 255, 255, 0.98);
+            background: __SURFACE_BG__;
             box-shadow: 0 10px 24px rgba(15, 23, 42, 0.12);
         }
+        .section-panel {
+            background: __GLASS_BG__;
+            border: 1.5px solid __GLASS_BORDER__;
+            border-radius: 22px;
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            box-shadow: 0 18px 38px rgba(15, 23, 42, 0.12);
+            padding: 18px 20px 12px 20px;
+            margin-bottom: 18px;
+            overflow: hidden;
+            animation: riseIn .45s ease-out both;
+        }
+        .process-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 12px;
+            margin: 12px 0 4px 0;
+        }
+        .process-card {
+            border-radius: 16px;
+            border: 1px solid __PROCESS_CARD_BORDER__;
+            background: __PROCESS_CARD_BG__;
+            padding: 14px 16px;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.5);
+        }
+        .process-step {
+            color: __MUTED_COLOR__;
+            font-size: 0.78rem;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: .08em;
+        }
+        .process-title {
+            color: __TEXT_COLOR__;
+            font-size: 1.05rem;
+            font-weight: 800;
+            margin-top: 6px;
+        }
+        .process-copy {
+            color: __TEXT_COLOR__;
+            font-size: 0.92rem;
+            margin-top: 6px;
+            opacity: .86;
+        }
+        .profile-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 12px;
+            margin: 8px 0 12px 0;
+        }
+        .profile-card {
+            border-radius: 16px;
+            background: __PROFILE_CARD_BG__;
+            border: 1px solid __PROFILE_CARD_BORDER__;
+            padding: 14px 16px;
+        }
+        .profile-label {
+            color: __MUTED_COLOR__;
+            font-size: 0.78rem;
+            text-transform: uppercase;
+            letter-spacing: .08em;
+            font-weight: 800;
+        }
+        .profile-value {
+            color: __TEXT_COLOR__;
+            font-size: 1.8rem;
+            font-weight: 800;
+            margin-top: 4px;
+        }
+        .profile-sub {
+            color: __MUTED_COLOR__;
+            font-size: 0.85rem;
+            margin-top: 4px;
+        }
+        .chip-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin: 10px 0 4px 0;
+        }
+        .chip {
+            display: inline-flex;
+            align-items: center;
+            padding: 8px 12px;
+            border-radius: 999px;
+            font-size: 0.85rem;
+            font-weight: 700;
+            color: __TEXT_COLOR__;
+            background: __CHIP_BG__;
+            border: 1px solid __CHIP_BORDER__;
+        }
+        @keyframes riseIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
         [data-testid="stPlotlyChart"] {
-            background: rgba(255, 255, 255, 0.98);
-            border: 1.5px solid #cbd5e1;
+            background: __PLOT_BG__;
+            border: 1.5px solid __PLOT_BORDER__;
             border-radius: 14px;
             box-shadow: 0 10px 24px rgba(15, 23, 42, 0.12);
             padding: 6px 8px 2px 8px;
+            overflow: hidden;
+        }
+        [data-testid="stHorizontalBlock"] > [data-testid="column"] {
+            align-self: stretch;
         }
         .stTabs [data-baseweb="tab-list"] {
             gap: 12px;
@@ -229,7 +435,8 @@ def apply_ui_theme(theme_mode="Light"):
             color: #ffffff !important;
         }
         .stCaption {
-            color: __MUTED_COLOR__ !important;
+            color: __BODY_TEXT_COLOR__ !important;
+            opacity: 0.9;
         }
         .hero-subtitle {
             font-size: 1.08rem;
@@ -259,6 +466,74 @@ def apply_ui_theme(theme_mode="Light"):
             border-color: #450a0a !important;
             background: linear-gradient(135deg, #b91c1c 0%, #dc2626 55%, #ef4444 100%) !important;
         }
+        @media (max-width: 1100px) {
+            .main .block-container {
+                max-width: 100%;
+                padding-left: 1rem;
+                padding-right: 1rem;
+            }
+            .hero-title {
+                font-size: 2.35rem;
+            }
+            .section-panel {
+                padding: 16px 16px 10px 16px;
+            }
+        }
+        @media (max-width: 900px) {
+            .hero-title {
+                font-size: 2rem;
+            }
+            .hero-subtitle {
+                font-size: 0.98rem;
+            }
+            .process-grid,
+            .profile-grid {
+                grid-template-columns: 1fr;
+            }
+            [data-testid="stHorizontalBlock"] {
+                gap: 0.8rem !important;
+                flex-wrap: wrap !important;
+            }
+            [data-testid="stHorizontalBlock"] > [data-testid="column"] {
+                min-width: 100% !important;
+                width: 100% !important;
+                flex: 1 1 100% !important;
+            }
+            [data-testid="stPlotlyChart"] {
+                padding: 4px 4px 2px 4px;
+            }
+            .stButton > button,
+            .stDownloadButton > button {
+                width: 100%;
+            }
+        }
+        @media (max-width: 640px) {
+            .main .block-container {
+                padding-top: 1rem;
+                padding-left: 0.75rem;
+                padding-right: 0.75rem;
+                padding-bottom: 1.5rem;
+            }
+            .hero-title {
+                font-size: 1.75rem;
+                line-height: 1.15;
+            }
+            h1, h2, h3 {
+                line-height: 1.2;
+            }
+            .section-panel,
+            .kpi-card {
+                border-radius: 14px;
+            }
+            [data-testid="stDataFrame"],
+            .stDataFrame,
+            .stCodeBlock {
+                overflow-x: auto;
+            }
+            [data-testid="stSidebar"] {
+                min-width: 16rem;
+            }
+        }
         </style>
         """
     code_bg = "rgba(30,58,138,0.35)" if is_dark else "rgba(59, 130, 246, 0.14)"
@@ -268,38 +543,350 @@ def apply_ui_theme(theme_mode="Light"):
         .replace("__TEXT_COLOR__", text_color)
         .replace("__TITLE_COLOR__", title_color)
         .replace("__MUTED_COLOR__", muted_color)
+        .replace("__BODY_TEXT_COLOR__", body_text_color)
+        .replace("__SIDEBAR_BG__", sidebar_bg)
+        .replace("__SIDEBAR_TEXT__", sidebar_text)
+        .replace("__SIDEBAR_BORDER__", sidebar_border)
         .replace("__GLASS_BG__", glass_bg)
         .replace("__GLASS_BORDER__", glass_border)
         .replace("__CODE_BG__", code_bg)
         .replace("__CODE_BORDER__", code_border)
+        .replace("__METRIC_BG__", metric_bg)
+        .replace("__METRIC_BORDER__", metric_border)
+        .replace("__METRIC_LABEL_TEXT__", metric_label_text)
+        .replace("__METRIC_VALUE_TEXT__", metric_value_text)
+        .replace("__INPUT_LABEL_TEXT__", input_label_text)
+        .replace("__SURFACE_BG__", surface_bg)
+        .replace("__SURFACE_BORDER__", surface_border)
+        .replace("__PLOT_BG__", plot_bg)
+        .replace("__PLOT_BORDER__", plot_border)
+        .replace("__PROCESS_CARD_BG__", process_card_bg)
+        .replace("__PROCESS_CARD_BORDER__", process_card_border)
+        .replace("__INPUT_BG__", input_bg)
+        .replace("__INPUT_BORDER__", input_border)
+        .replace("__INPUT_TEXT__", input_text)
+        .replace("__INPUT_PLACEHOLDER__", input_placeholder)
+        .replace("__INPUT_FOCUS_BORDER__", input_focus_border)
+        .replace("__INPUT_FOCUS_SHADOW__", input_focus_shadow)
+        .replace("__PROFILE_CARD_BG__", profile_card_bg)
+        .replace("__PROFILE_CARD_BORDER__", profile_card_border)
+        .replace("__CHIP_BG__", chip_bg)
+        .replace("__CHIP_BORDER__", chip_border)
     )
     st.markdown(css, unsafe_allow_html=True)
 
 
-def style_chart(fig):
+def _profile_palette(profile_name):
+    palettes = {
+        "Sales Performance": {
+            "primary": "#ef4444",
+            "line": "#f97316",
+            "pie": ["#ef4444", "#f97316", "#fb7185", "#fdba74", "#fca5a5"],
+        },
+        "Inventory Operations": {
+            "primary": "#0ea5e9",
+            "line": "#22c55e",
+            "pie": ["#0ea5e9", "#22c55e", "#14b8a6", "#38bdf8", "#86efac"],
+        },
+        "Marketing Performance": {
+            "primary": "#8b5cf6",
+            "line": "#ec4899",
+            "pie": ["#8b5cf6", "#ec4899", "#a78bfa", "#f472b6", "#c4b5fd"],
+        },
+        "Healthcare Operations": {
+            "primary": "#2563eb",
+            "line": "#06b6d4",
+            "pie": ["#2563eb", "#06b6d4", "#60a5fa", "#67e8f9", "#93c5fd"],
+        },
+        "Finance Executive": {
+            "primary": "#0f766e",
+            "line": "#14b8a6",
+            "pie": ["#0f766e", "#14b8a6", "#2dd4bf", "#5eead4", "#99f6e4"],
+        },
+        "General Executive": {
+            "primary": "#f59e0b",
+            "line": "#22c55e",
+            "pie": ["#f59e0b", "#60a5fa", "#34d399", "#f472b6", "#a78bfa"],
+        },
+    }
+    return palettes.get(profile_name, palettes["General Executive"])
+
+
+def infer_dashboard_profile(df, schema):
+    columns = [str(c).lower() for c in list(schema.get("columns", []))]
+    col_blob = " ".join(columns)
+
+    rules = [
+        (
+            "Sales Performance",
+            ("sale", "sales", "revenue", "profit", "order", "quantity"),
+            "Best for transaction/sales datasets with KPI-first layout and performance charts.",
+        ),
+        (
+            "Inventory Operations",
+            ("inventory", "stock", "supply", "warehouse", "replenishment", "product"),
+            "Best for stock and fulfillment datasets with category and availability focus.",
+        ),
+        (
+            "Marketing Performance",
+            ("impression", "click", "ctr", "campaign", "seo", "traffic", "conversion"),
+            "Best for campaign/channel datasets with funnel and trend sections.",
+        ),
+        (
+            "Healthcare Operations",
+            ("patient", "hospital", "department", "visit", "wait", "doctor"),
+            "Best for operational healthcare datasets with service and throughput views.",
+        ),
+        (
+            "Finance Executive",
+            ("asset", "liability", "cogs", "expense", "margin", "balance", "cash"),
+            "Best for financial statement datasets with margin and ratio dashboards.",
+        ),
+    ]
+
+    for name, keys, reason in rules:
+        if any(key in col_blob for key in keys):
+            return name, reason
+
+    return (
+        "General Executive",
+        "Best default for mixed datasets using KPIs, distribution, trend, and correlation charts.",
+    )
+
+
+def style_chart(fig, profile_name="General Executive"):
     if fig is None:
         return fig
+    is_dark = str(st.session_state.get("theme_mode", "Light")).lower() == "dark"
+    palette = _profile_palette(profile_name)
     fig.update_layout(
-        template="plotly_white",
-        paper_bgcolor="rgba(255,255,255,0.98)",
-        plot_bgcolor="rgba(255,255,255,0.96)",
-        font=dict(family="Manrope, sans-serif", color="#0f172a", size=13),
-        title=dict(font=dict(size=20, color="#0f172a")),
+        template="plotly_dark" if is_dark else "plotly_white",
+        paper_bgcolor="rgba(15,23,42,0.94)" if is_dark else "rgba(255,255,255,0.98)",
+        plot_bgcolor="rgba(15,23,42,0.90)" if is_dark else "rgba(255,255,255,0.96)",
+        font=dict(
+            family="Manrope, sans-serif",
+            color="#e5e7eb" if is_dark else "#0f172a",
+            size=13,
+        ),
+        title=dict(font=dict(size=20, color="#f8fafc" if is_dark else "#0f172a")),
         margin=dict(l=20, r=20, t=56, b=24),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+        transition=dict(duration=650, easing="cubic-in-out"),
+        uirevision="dashboard-static",
     )
-    fig.update_xaxes(showgrid=True, gridcolor="rgba(15,23,42,0.08)", zeroline=False)
-    fig.update_yaxes(showgrid=True, gridcolor="rgba(15,23,42,0.08)", zeroline=False)
+    fig.update_xaxes(
+        showgrid=True,
+        gridcolor="rgba(148,163,184,0.16)" if is_dark else "rgba(15,23,42,0.08)",
+        zeroline=False,
+    )
+    fig.update_yaxes(
+        showgrid=True,
+        gridcolor="rgba(148,163,184,0.16)" if is_dark else "rgba(15,23,42,0.08)",
+        zeroline=False,
+    )
     for trace in fig.data:
         t = getattr(trace, "type", "")
         if t == "pie":
             continue
         if hasattr(trace, "marker"):
             try:
-                trace.marker.color = "#f59e0b"
+                trace.marker.color = palette["primary"]
             except Exception:
                 pass
     return fig
+
+
+def why_this_graph(chart_key):
+    reasons = {
+        "bar": "Why this graph: compares categories or records to quickly see which values are highest or lowest.",
+        "line": "Why this graph: shows change/trend patterns across records or grouped categories.",
+        "pie": "Why this graph: highlights distribution share so you can see dominant segments.",
+        "scatter": "Why this graph: reveals relationship/correlation between two numeric fields.",
+    }
+    return reasons.get(chart_key, "Why this graph: useful visual summary of the current result.")
+
+
+def get_current_page():
+    raw_page = st.query_params.get("page", "input")
+    page = str(raw_page).strip().lower()
+    mapping = {
+        "input": "Input",
+        "output": "Output",
+        "download": "Download",
+    }
+    return mapping.get(page, "Input")
+
+
+def set_current_page(page_name):
+    page_key = str(page_name).strip().lower()
+    st.query_params["page"] = page_key
+
+
+def navigate_to_page(page_name):
+    set_current_page(page_name)
+    st.rerun()
+
+
+def render_top_page_nav(current_page):
+    spacer_left, input_col, output_col, download_col, spacer_right = st.columns(
+        [1.4, 0.9, 0.9, 0.9, 1.4]
+    )
+    with input_col:
+        if st.button(
+            "Input",
+            key=f"top_input_{current_page}",
+            type="primary" if current_page == "Input" else "secondary",
+        ):
+            navigate_to_page("Input")
+    with output_col:
+        if st.button(
+            "Output",
+            key=f"top_output_{current_page}",
+            type="primary" if current_page == "Output" else "secondary",
+        ):
+            navigate_to_page("Output")
+    with download_col:
+        if st.button(
+            "Download",
+            key=f"top_download_{current_page}",
+            type="primary" if current_page == "Download" else "secondary",
+        ):
+            navigate_to_page("Download")
+
+
+def sync_uploaded_datasets(uploaded_files):
+    datasets = {}
+    for item in uploaded_files or []:
+        datasets[item.name] = item.getvalue()
+    st.session_state.uploaded_datasets = datasets
+    if datasets and st.session_state.active_dataset_name not in datasets:
+        st.session_state.active_dataset_name = list(datasets.keys())[0]
+
+
+def available_dataset_options():
+    options = ["Default dataset"]
+    options.extend(sorted(st.session_state.uploaded_datasets.keys()))
+    return options
+
+
+def current_dataset_payload():
+    selected_name = st.session_state.active_dataset_name
+    if selected_name and selected_name in st.session_state.uploaded_datasets:
+        return (
+            read_csv_bytes_with_fallback(st.session_state.uploaded_datasets[selected_name]),
+            selected_name,
+            True,
+        )
+    if DEFAULT_DATASET_PATH.exists():
+        return (load_csv_from_path(DEFAULT_DATASET_PATH), DEFAULT_DATASET_PATH.name, False)
+    return ((None, None, None), None, False)
+
+
+def top_column_labels(schema):
+    labels = []
+    for item in schema.get("top_columns", [])[:5]:
+        labels.append(
+            f'{item["name"]} ({item["dtype"]}, {item["non_null_pct"]:.1f}% filled)'
+        )
+    return labels
+
+
+def render_dataset_profile(schema):
+    chips = "".join([f'<span class="chip">{html.escape(label)}</span>' for label in top_column_labels(schema)])
+    st.markdown(
+        f"""
+        <div class="section-panel">
+            <h3>Dataset Profiling</h3>
+            <div class="profile-grid">
+                <div class="profile-card">
+                    <div class="profile-label">Rows</div>
+                    <div class="profile-value">{schema.get("rows", 0):,}</div>
+                    <div class="profile-sub">Records available for analysis</div>
+                </div>
+                <div class="profile-card">
+                    <div class="profile-label">Columns</div>
+                    <div class="profile-value">{schema.get("column_count", 0)}</div>
+                    <div class="profile-sub">Fields currently loaded</div>
+                </div>
+                <div class="profile-card">
+                    <div class="profile-label">Missing Values</div>
+                    <div class="profile-value">{schema.get("missing_values", 0):,}</div>
+                    <div class="profile-sub">Null cells across the active dataset</div>
+                </div>
+                <div class="profile-card">
+                    <div class="profile-label">Top Columns</div>
+                    <div class="profile-value">{len(schema.get("top_columns", []))}</div>
+                    <div class="profile-sub">Most complete and informative fields</div>
+                </div>
+            </div>
+            <div class="chip-row">{chips}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_nl_sql_panel():
+    st.markdown(
+        """
+        <div class="section-panel">
+            <h3>Natural Language SQL</h3>
+            <div class="process-grid">
+                <div class="process-card">
+                    <div class="process-step">Step 1</div>
+                    <div class="process-title">User types a business question</div>
+                    <div class="process-copy"><code>top 10 customers by revenue</code></div>
+                </div>
+                <div class="process-card">
+                    <div class="process-step">Step 2</div>
+                    <div class="process-title">AI converts it to SQL</div>
+                    <div class="process-copy">The app maps business language to dataset fields, generates SQL, and repairs it if needed.</div>
+                </div>
+                <div class="process-card">
+                    <div class="process-step">Step 3</div>
+                    <div class="process-title">Enterprise dashboard is built</div>
+                    <div class="process-copy">KPIs, charts, explanations, and downloads are produced from the active result set.</div>
+                </div>
+            </div>
+            <div class="process-copy">
+                Supported input languages: English, Hindi, Bengali, Tamil, Telugu, Marathi, Gujarati, Punjabi, Kannada, Spanish, French, German, Chinese, Arabic, Japanese, and Malayalam.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_download_actions(dashboard_source, charts, prefix):
+    left_col, right_col = st.columns(2)
+    csv_bytes = dashboard_source.to_csv(index=False).encode("utf-8")
+    with left_col:
+        st.download_button(
+            "Download Results",
+            data=csv_bytes,
+            file_name="dashboard_results.csv",
+            mime="text/csv",
+            type="primary",
+            key=f"{prefix}_download_results",
+        )
+    with right_col:
+        dashboard_html = build_dashboard_html(
+            charts=charts,
+            explanation=st.session_state.last_explanation,
+            sql=st.session_state.last_sql,
+            query_type=st.session_state.last_query_type,
+            query_source=st.session_state.last_query_source,
+            data_preview=dashboard_source,
+            user_query=st.session_state.last_user_query,
+        ).encode("utf-8")
+        st.download_button(
+            "Download Dashboard (HTML)",
+            data=dashboard_html,
+            file_name="dashboard_report.html",
+            mime="text/html",
+            type="primary",
+            key=f"{prefix}_download_dashboard",
+        )
 
 
 if "theme_mode" not in st.session_state:
@@ -316,12 +903,7 @@ with st.sidebar:
     )
 
 apply_ui_theme(st.session_state.theme_mode)
-st.markdown('<h1 class="hero-title">𝐀𝐈 𝐁𝐮𝐢𝐬𝐧𝐞𝐬𝐬 𝐃𝐚𝐬𝐡𝐛𝐨𝐚𝐫𝐝</h1>', unsafe_allow_html=True)
-st.markdown(
-    '<p class="hero-subtitle">Automatic Dashboard Builder prompt: '
-    '<code>Create a customer behavior dashboard</code></p>',
-    unsafe_allow_html=True,
-)
+st.markdown('<h1 class="hero-title">AI Business Dashboard</h1>', unsafe_allow_html=True)
 
 
 def sanitize_column_name(name):
@@ -350,8 +932,8 @@ def normalize_columns(df):
     return df.rename(columns=rename_map), rename_map
 
 
-def read_csv_with_fallback(uploaded_file):
-    data = uploaded_file.getvalue()
+@st.cache_data(show_spinner=False)
+def _cached_read_csv_bytes_with_fallback(data):
     decoded = data.decode("latin-1", errors="ignore")
     lower = decoded.lower()
 
@@ -377,43 +959,31 @@ def read_csv_with_fallback(uploaded_file):
             return df, enc, False
         except UnicodeDecodeError:
             continue
-
-    df = pd.read_csv(io.BytesIO(data), encoding="utf-8", encoding_errors="replace")
-    return df, "utf-8 (replacement)", True
-
-
-def load_csv_from_path(csv_path):
-    with csv_path.open("rb") as source_file:
-        data = source_file.read()
-
-    decoded = data.decode("latin-1", errors="ignore")
-    lower = decoded.lower()
-    if "bplist00" in lower and "<pre" in lower:
-        pre_start = lower.find("<pre")
-        pre_open_end = decoded.find(">", pre_start)
-        pre_end = lower.find("</pre>", pre_open_end)
-        if pre_open_end != -1 and pre_end != -1:
-            embedded_csv = html.unescape(decoded[pre_open_end + 1 : pre_end]).strip()
-            try:
-                df = pd.read_csv(io.StringIO(embedded_csv))
-                return df, "embedded-csv-from-html", False
-            except Exception:
-                pass
-
-    for enc in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
-        try:
-            df = pd.read_csv(io.BytesIO(data), encoding=enc)
-            bad_columns = [str(c).lower() for c in df.columns]
-            if len(df.columns) <= 1 or any("bplist00" in c for c in bad_columns):
-                continue
-            return df, enc, False
-        except UnicodeDecodeError:
-            continue
         except pd.errors.ParserError:
             continue
 
     df = pd.read_csv(io.BytesIO(data), encoding="utf-8", encoding_errors="replace")
     return df, "utf-8 (replacement)", True
+
+
+def read_csv_bytes_with_fallback(data):
+    return _cached_read_csv_bytes_with_fallback(data)
+
+
+def read_csv_with_fallback(uploaded_file):
+    return read_csv_bytes_with_fallback(uploaded_file.getvalue())
+
+
+@st.cache_data(show_spinner=False)
+def _cached_load_csv_from_path(csv_path_str, modified_time_ns):
+    del modified_time_ns
+    with Path(csv_path_str).open("rb") as source_file:
+        data = source_file.read()
+    return read_csv_bytes_with_fallback(data)
+
+
+def load_csv_from_path(csv_path):
+    return _cached_load_csv_from_path(str(csv_path), csv_path.stat().st_mtime_ns)
 
 
 def apply_filters(df):
@@ -428,7 +998,7 @@ def apply_filters(df):
         selected = st.multiselect(
             f"{col}",
             options=values,
-            default=values,
+            default=[],
             key=f"flt_cat_{col}",
         )
         if selected:
@@ -439,14 +1009,16 @@ def apply_filters(df):
         max_val = float(filtered[col].max()) if len(filtered) else 0.0
         if min_val == max_val:
             continue
-        chosen = st.slider(
-            f"{col} range",
-            min_value=min_val,
-            max_value=max_val,
-            value=(min_val, max_val),
-            key=f"flt_num_{col}",
-        )
-        filtered = filtered[(filtered[col] >= chosen[0]) & (filtered[col] <= chosen[1])]
+        apply_range = st.checkbox(f"Apply {col} range filter", key=f"flt_num_enable_{col}")
+        if apply_range:
+            chosen = st.slider(
+                f"{col} range",
+                min_value=min_val,
+                max_value=max_val,
+                value=(min_val, max_val),
+                key=f"flt_num_{col}",
+            )
+            filtered = filtered[(filtered[col] >= chosen[0]) & (filtered[col] <= chosen[1])]
 
     return filtered
 
@@ -525,11 +1097,259 @@ def render_kpis(df):
         )
 
 
+def build_correlation_heatmap(df):
+    numeric_cols = list(df.select_dtypes(include="number").columns)
+    if len(numeric_cols) < 2:
+        return None
+    corr = df[numeric_cols].corr(numeric_only=True)
+    if corr.empty:
+        return None
+    corr = corr.round(2)
+    return px.imshow(
+        corr,
+        text_auto=".2f",
+        aspect="auto",
+        color_continuous_scale="RdBu_r",
+        zmin=-1,
+        zmax=1,
+        title="Heat Map (Correlation)",
+    )
+
+
+def build_confusing_metrics(df, max_rows=8):
+    numeric_cols = list(df.select_dtypes(include="number").columns)
+    if not numeric_cols:
+        return pd.DataFrame()
+
+    rows = []
+    for col in numeric_cols:
+        series = pd.to_numeric(df[col], errors="coerce")
+        non_null = series.dropna()
+        missing_pct = float(series.isna().mean() * 100) if len(series) else 0.0
+        zero_pct = float((non_null == 0).mean() * 100) if len(non_null) else 0.0
+        unique_pct = float(non_null.nunique() / len(non_null) * 100) if len(non_null) else 0.0
+        avg_value = float(non_null.mean()) if len(non_null) else 0.0
+        std_value = float(non_null.std()) if len(non_null) > 1 else 0.0
+        confusion_score = (
+            (missing_pct * 0.5)
+            + (max(0.0, 40.0 - unique_pct) * 0.8)
+            + (max(0.0, zero_pct - 30.0) * 0.6)
+        )
+        rows.append(
+            {
+                "Metric": col,
+                "Missing %": round(missing_pct, 1),
+                "Zero %": round(zero_pct, 1),
+                "Unique %": round(unique_pct, 1),
+                "Average": round(avg_value, 2),
+                "Std Dev": round(std_value, 2),
+                "Confusion Score": round(confusion_score, 1),
+            }
+        )
+
+    metrics_df = pd.DataFrame(rows)
+    if metrics_df.empty:
+        return metrics_df
+    return metrics_df.sort_values("Confusion Score", ascending=False).head(max_rows)
+
+
+def render_fixed_dashboard_layout(
+    dashboard_source,
+    charts,
+    output_profile,
+    palette,
+    translated_chart_summaries,
+    translated_strategic_insights,
+    is_invalid_query,
+    style_chart,
+):
+    dashboard_title = str(st.session_state.get("last_user_query", "")).strip()
+    if not dashboard_title:
+        dashboard_title = f"{output_profile} Dashboard"
+    is_dark = str(st.session_state.get("theme_mode", "Light")).lower() == "dark"
+    heading_color = "#f8fafc" if is_dark else "#0f172a"
+    subtitle_color = "#cbd5e1" if is_dark else "#334155"
+    title_box_bg = (
+        "linear-gradient(180deg, rgba(30,41,59,0.92) 0%, rgba(15,23,42,0.88) 100%)"
+        if is_dark
+        else "linear-gradient(180deg, rgba(255,255,255,0.88) 0%, rgba(255,255,255,0.68) 100%)"
+    )
+
+    st.markdown(
+        f"""
+        <div style="
+            width: 100%;
+            border: 1.5px solid rgba(148,163,184,0.42);
+            border-radius: 18px;
+            padding: 16px 24px;
+            margin-bottom: 18px;
+            text-align: center;
+            background: {title_box_bg};
+            box-shadow: 0 10px 24px rgba(15, 23, 42, 0.10);
+        ">
+            <div style="font-size: 1.45rem; font-weight: 800; color: {heading_color};">{html.escape(dashboard_title)}</div>
+            <div style="font-size: 0.88rem; margin-top: 6px; opacity: 0.92; color: {subtitle_color};">Dashboard Name</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    row1_col1, row1_col2, row1_col3 = st.columns([1, 1, 0.9], gap="large")
+    with row1_col1:
+        st.markdown('<div class="section-panel">', unsafe_allow_html=True)
+        st.subheader("Chart 1")
+        if charts["bar"] is not None:
+            st.plotly_chart(style_chart(charts["bar"], output_profile), use_container_width=True)
+        else:
+            st.info("Chart 1 is not available.")
+        st.markdown("</div>", unsafe_allow_html=True)
+    with row1_col2:
+        st.markdown('<div class="section-panel">', unsafe_allow_html=True)
+        st.subheader("Chart 2")
+        if charts["line"] is not None:
+            styled_line = style_chart(charts["line"], output_profile)
+            styled_line.update_traces(line=dict(color=palette["line"], width=3))
+            st.plotly_chart(styled_line, use_container_width=True)
+        else:
+            st.info("Chart 2 is not available.")
+        st.markdown("</div>", unsafe_allow_html=True)
+    with row1_col3:
+        st.markdown('<div class="section-panel">', unsafe_allow_html=True)
+        st.subheader("AI Summary (Short)")
+        if is_invalid_query:
+            st.warning("AI summary is blocked for invalid queries.")
+        elif translated_chart_summaries:
+            for item in translated_chart_summaries[:3]:
+                st.markdown(f"- {item}")
+        elif translated_strategic_insights:
+            for item in translated_strategic_insights[:3]:
+                st.markdown(f"- {item}")
+        else:
+            st.write("AI summary is unavailable right now.")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    row2_col1, row2_col2, row2_col3 = st.columns([1, 1, 0.9], gap="large")
+    with row2_col1:
+        st.markdown('<div class="section-panel">', unsafe_allow_html=True)
+        st.subheader("Chart 3")
+        if charts["pie"] is not None:
+            styled_pie = style_chart(charts["pie"], output_profile)
+            styled_pie.update_traces(marker=dict(colors=palette["pie"]))
+            st.plotly_chart(styled_pie, use_container_width=True)
+        else:
+            st.info("Chart 3 is not available.")
+        st.markdown("</div>", unsafe_allow_html=True)
+    with row2_col2:
+        st.markdown('<div class="section-panel">', unsafe_allow_html=True)
+        st.subheader("Chart 4")
+        if charts["scatter"] is not None:
+            styled_scatter = style_chart(charts["scatter"], output_profile)
+            styled_scatter.update_traces(
+                marker=dict(color=palette["primary"], size=10, opacity=0.8)
+            )
+            st.plotly_chart(styled_scatter, use_container_width=True)
+        else:
+            st.info("Chart 4 is not available.")
+        st.markdown("</div>", unsafe_allow_html=True)
+    with row2_col3:
+        st.markdown('<div class="section-panel">', unsafe_allow_html=True)
+        st.subheader("Heat Map")
+        heatmap = build_correlation_heatmap(dashboard_source)
+        if heatmap is not None:
+            st.plotly_chart(style_chart(heatmap, output_profile), use_container_width=True)
+        else:
+            st.info("Heat map is unavailable (need at least 2 numeric columns).")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    row3_col1, row3_col2 = st.columns([1.5, 0.95], gap="large")
+    with row3_col1:
+        st.markdown('<div class="section-panel">', unsafe_allow_html=True)
+        st.subheader("Extracted Table")
+        st.dataframe(dashboard_source.head(100), use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+    with row3_col2:
+        st.markdown('<div class="section-panel">', unsafe_allow_html=True)
+        st.subheader("Confusing Metrics")
+        confusing_metrics = build_confusing_metrics(dashboard_source)
+        if confusing_metrics.empty:
+            st.info("Confusing metrics are unavailable (no numeric columns found).")
+        else:
+            st.dataframe(confusing_metrics, use_container_width=True, hide_index=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown('<div class="section-panel">', unsafe_allow_html=True)
+    st.subheader("AI Insights")
+    if is_invalid_query:
+        st.warning("AI insights are blocked for invalid queries.")
+    elif translated_strategic_insights:
+        for insight in translated_strategic_insights[:8]:
+            st.markdown(f"- {insight}")
+    else:
+        st.write("AI insights are unavailable right now.")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def reset_analysis_chat(chat_key):
+    if st.session_state.get("analysis_chat_key") != chat_key:
+        st.session_state.analysis_chat_key = chat_key
+        st.session_state.analysis_chat_history = []
+
+
+def render_analysis_chatbot(
+    df,
+    chart_explanations,
+    strategic_insights,
+    chart_summaries,
+    language_code,
+    language_name,
+):
+    st.markdown('<div class="section-panel">', unsafe_allow_html=True)
+    st.subheader("Chatbot")
+    st.caption("Ask about trend, profit, segments, correlation, or the overall conclusion.")
+
+    history = st.session_state.get("analysis_chat_history", [])
+    if history:
+        for item in history[-4:]:
+            st.markdown(f"**You:** {item['question']}")
+            st.write(item["answer"])
+    else:
+        st.write(
+            bilingual_text(
+                "I can answer questions from the current dashboard analysis.",
+                language_code,
+                language_name,
+            )
+        )
+
+    with st.form("analysis_chat_form", clear_on_submit=True):
+        chat_question = st.text_input(
+            "Ask the chatbot",
+            key="analysis_chat_input",
+            placeholder="What is the profit outlook?",
+        )
+        ask_clicked = st.form_submit_button("Ask", type="primary")
+
+    if ask_clicked and chat_question.strip():
+        raw_answer = answer_analysis_question(
+            chat_question.strip(),
+            df,
+            chart_explanations=chart_explanations,
+            strategic_insights=strategic_insights,
+            chart_summaries=chart_summaries,
+        )
+        localized_answer = bilingual_text(raw_answer, language_code, language_name)
+        st.session_state.analysis_chat_history.append(
+            {"question": chat_question.strip(), "answer": localized_answer}
+        )
+        st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
 def reset_filters():
     keys = [
         k
         for k in st.session_state.keys()
-        if k.startswith("flt_cat_") or k.startswith("flt_num_")
+        if k.startswith("flt_cat_") or k.startswith("flt_num_") or k.startswith("flt_num_enable_")
     ]
     for k in keys:
         del st.session_state[k]
@@ -578,6 +1398,57 @@ def _result_signature(df, sql):
     return f"{sql}|{len(df)}|{sample_hash}"
 
 
+def get_output_analysis_bundle(dashboard_source, sql):
+    analysis_frame = prepare_analysis_frame(dashboard_source)
+    cache_key = _result_signature(analysis_frame.head(200), sql)
+    cached_bundle = st.session_state.get("output_analysis_cache", {})
+    if cached_bundle.get("key") == cache_key:
+        return cached_bundle
+
+    chart_explanations = explain_all_charts(analysis_frame)
+    chart_summaries = summarize_all_charts(chart_explanations)
+    trend_insights = generate_trend_insights(analysis_frame)
+    strategic_insights = generate_strategic_insights(analysis_frame)
+    last_explanation = (
+        " ".join(strategic_insights or trend_insights)
+        if (strategic_insights or trend_insights)
+        else "Explanation is unavailable right now."
+    )
+    bundle = {
+        "key": cache_key,
+        "chart_explanations": chart_explanations,
+        "chart_summaries": chart_summaries,
+        "trend_insights": trend_insights,
+        "strategic_insights": strategic_insights,
+        "last_explanation": last_explanation,
+    }
+    st.session_state.output_analysis_cache = bundle
+    return bundle
+
+
+def get_cached_dashboard_charts(dashboard_source, sql):
+    cache_key = _result_signature(dashboard_source.head(200), sql)
+    cached_bundle = st.session_state.get("dashboard_chart_cache", {})
+    if cached_bundle.get("key") == cache_key:
+        return cached_bundle.get("charts", {})
+
+    charts = build_dashboard_charts(dashboard_source)
+    st.session_state.dashboard_chart_cache = {"key": cache_key, "charts": charts}
+    return charts
+
+
+def get_cached_schema(df, rename_map, cache_name):
+    cache_key = _result_signature(df.head(200), cache_name)
+    schema_cache = st.session_state.get("schema_cache", {})
+    if cache_name in schema_cache and schema_cache[cache_name].get("key") == cache_key:
+        return schema_cache[cache_name].get("schema", {})
+
+    schema = analyze_dataset(df, rename_map)
+    schema_cache[cache_name] = {"key": cache_key, "schema": schema}
+    st.session_state.schema_cache = schema_cache
+    return schema
+
+
 def build_dashboard_html(
     charts, explanation, sql, query_type, query_source, data_preview, user_query=""
 ):
@@ -619,6 +1490,17 @@ def build_dashboard_html(
 """
 
 
+def render_user_prompt_panel(user_query):
+    prompt_text = str(user_query or "").strip()
+    if not prompt_text:
+        return
+    st.markdown('<div class="section-panel">', unsafe_allow_html=True)
+    st.subheader("Input Prompt")
+    st.caption("Original question used to generate this output")
+    st.code(prompt_text)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
@@ -652,36 +1534,81 @@ if "query_run_nonce" not in st.session_state:
 if "last_user_query" not in st.session_state:
     st.session_state.last_user_query = ""
 
+if "last_query_invalid" not in st.session_state:
+    st.session_state.last_query_invalid = False
 
-uploaded_file = st.file_uploader("Upload dataset")
+if "last_invalid_message" not in st.session_state:
+    st.session_state.last_invalid_message = ""
+
+if "last_user_language_code" not in st.session_state:
+    st.session_state.last_user_language_code = "en"
+
+if "last_user_language_name" not in st.session_state:
+    st.session_state.last_user_language_name = "English"
+
+if "analysis_chat_history" not in st.session_state:
+    st.session_state.analysis_chat_history = []
+
+if "analysis_chat_key" not in st.session_state:
+    st.session_state.analysis_chat_key = ""
+
+if "page_notice" not in st.session_state:
+    st.session_state.page_notice = ""
+
+if "uploaded_datasets" not in st.session_state:
+    st.session_state.uploaded_datasets = {}
+
+if "active_dataset_name" not in st.session_state:
+    st.session_state.active_dataset_name = "Default dataset"
+
+if "output_analysis_cache" not in st.session_state:
+    st.session_state.output_analysis_cache = {}
+
+if "dashboard_chart_cache" not in st.session_state:
+    st.session_state.dashboard_chart_cache = {}
+
+if "schema_cache" not in st.session_state:
+    st.session_state.schema_cache = {}
+
+current_page = get_current_page()
+uploaded_files = []
+if current_page == "Input":
+    uploaded_files = st.file_uploader(
+        "Drag-drop dashboard builder: upload one or more datasets",
+        key="dataset_uploader",
+        accept_multiple_files=True,
+    )
+    if uploaded_files:
+        sync_uploaded_datasets(uploaded_files)
 
 df = None
 encoding_used = None
 had_replacements = False
 dataset_label = None
 
-if uploaded_file:
-    df, encoding_used, had_replacements = read_csv_with_fallback(uploaded_file)
-    dataset_label = uploaded_file.name
-elif DEFAULT_DATASET_PATH.exists():
-    df, encoding_used, had_replacements = load_csv_from_path(DEFAULT_DATASET_PATH)
-    dataset_label = DEFAULT_DATASET_PATH.name
+(dataset_load, dataset_label, using_uploaded_dataset) = current_dataset_payload()
+df, encoding_used, had_replacements = dataset_load
 
 if df is not None:
     df, rename_map = normalize_columns(df)
 
-    if uploaded_file:
-        st.success(f"Using uploaded dataset: `{dataset_label}`")
-    else:
-        st.info(
-            "No dataset uploaded. Running queries against the default dataset "
-            f"`{dataset_label}`."
+    if current_page == "Input":
+        st.markdown(
+            '<p class="hero-subtitle">Automatic Dashboard Builder prompt: '
+            '<code>Create a customer behavior dashboard</code></p>',
+            unsafe_allow_html=True,
         )
+
+        if using_uploaded_dataset:
+            st.success(f"Using uploaded dataset: `{dataset_label}`")
+        else:
+            st.info(
+                "No dataset uploaded. Running queries against the default dataset "
+                f"`{dataset_label}`."
+            )
 
     if had_replacements:
         st.warning("File contained invalid UTF-8 bytes. Loaded with replacement characters.")
-    else:
-        st.caption(f"Loaded with encoding: {encoding_used}")
 
     if any(str(k) != str(v) for k, v in rename_map.items()):
         with st.expander("Column mapping", expanded=False):
@@ -693,8 +1620,34 @@ if df is not None:
             )
             st.dataframe(mapping_df, use_container_width=True)
 
+    filtered_df = df.copy()
+    schema = get_cached_schema(filtered_df, rename_map, "input_page")
+    profile_name, profile_reason = infer_dashboard_profile(filtered_df, schema)
+    page_options = ["Input", "Output", "Download"]
+    if st.session_state.get("page_nav_radio") != current_page:
+        st.session_state.page_nav_radio = current_page
+
     with st.sidebar:
         st.subheader("Navigation")
+        dataset_options = available_dataset_options()
+        if st.session_state.active_dataset_name not in dataset_options:
+            st.session_state.active_dataset_name = dataset_options[0]
+        st.selectbox(
+            "Active Dataset",
+            options=dataset_options,
+            key="active_dataset_name",
+        )
+        selected_page = st.radio(
+            "Page",
+            options=page_options,
+            index=page_options.index(current_page) if current_page in page_options else 0,
+            key="page_nav_radio",
+        )
+        if selected_page != current_page:
+            set_current_page(selected_page)
+            st.rerun()
+        st.caption(f"Recommended layout: `{profile_name}`")
+        st.caption(profile_reason)
         st.caption("Chat History")
         if not st.session_state.chat_history:
             st.info("No chat history yet.")
@@ -703,12 +1656,24 @@ if df is not None:
                 st.markdown(f"**Q:** {item['question']}")
                 st.caption(f"{item['query_type']} | {item['source']}")
 
-    dashboard_tab, download_tab = st.tabs(["Dashboard", "Download & Results"])
+    render_top_page_nav(current_page)
 
-    question = None
-    selected_question = None
+    if current_page == "Input":
+        if st.session_state.page_notice:
+            st.warning(st.session_state.page_notice)
+            st.session_state.page_notice = ""
+        question = None
 
-    with dashboard_tab:
+        st.markdown(
+            f"""
+            <div class="section-panel">
+                <h3>Enterprise Workspace</h3>
+                <div class="process-copy">Multi-dataset support is active. Pick an active dataset from the sidebar, then ask a business question to generate an executive dashboard.</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
         filter_col1, filter_col2 = st.columns([1, 5])
         with filter_col1:
             filter_btn_label = "Hide Filters" if st.session_state.show_filters else "Show Filters"
@@ -729,37 +1694,20 @@ if df is not None:
                 filtered_df = apply_filters(df)
         else:
             filtered_df = df.copy()
+        schema = get_cached_schema(filtered_df, rename_map, "input_filters")
+        profile_name, profile_reason = infer_dashboard_profile(filtered_df, schema)
 
-        schema = analyze_dataset(filtered_df, rename_map)
+        render_dataset_profile(schema)
+        render_nl_sql_panel()
 
-        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-        st.subheader("Dataset Summary Panel")
-        st.write(
-            f"Rows: `{len(filtered_df):,}` | Columns: `{len(filtered_df.columns)}` | "
-            f"Numeric: `{len(schema['numeric'])}` | Categorical: `{len(schema['categorical'])}`"
-        )
+        st.markdown('<div class="section-panel">', unsafe_allow_html=True)
+        st.subheader("Dataset Preview")
+        st.caption(f"Best dashboard style for this data: `{profile_name}`")
         st.dataframe(filtered_df.head(8), use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
-        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+        st.markdown('<div class="section-panel">', unsafe_allow_html=True)
         st.subheader("Dashboard Generator")
-        st.write("Use prompt like: `Create a customer behavior dashboard`")
-        sample_questions = [
-            "Create a customer behavior dashboard",
-            "last month income",
-            "this month income vs last month income",
-            "average daily internet hours",
-            "internet hours vs social media hours",
-            "top 5 people by monthly income",
-            "show monthly income and daily internet hours",
-        ]
-
-        b1, b2 = st.columns(2)
-        for idx, prompt in enumerate(sample_questions):
-            col = b1 if idx % 2 == 0 else b2
-            if col.button(prompt, key=f"sample_{idx}", type="secondary"):
-                selected_question = prompt
-                st.session_state.input_question = prompt
 
         with st.form("query_form", clear_on_submit=False):
             st.text_input(
@@ -773,26 +1721,57 @@ if df is not None:
         if run_clicked:
             st.session_state.query_run_nonce += 1
 
-        if selected_question:
-            question = selected_question
-        elif run_clicked and st.session_state.input_question.strip():
+        if run_clicked and st.session_state.input_question.strip():
             question = st.session_state.input_question.strip()
 
         dashboard_source = filtered_df.head(500)
         if question:
             st.session_state.last_user_query = question
-            auto_dashboard = "create" in question.lower() and "dashboard" in question.lower()
+            detected_lang_code, detected_lang_name = detect_input_language(question)
+            st.session_state.last_user_language_code = detected_lang_code
+            st.session_state.last_user_language_name = detected_lang_name
+            processed_question = translate_question_to_english(
+                question,
+                detected_lang_code,
+                detected_lang_name,
+            ).strip() or question
+            auto_dashboard = (
+                "create" in processed_question.lower()
+                and "dashboard" in processed_question.lower()
+            )
             if not auto_dashboard:
-                result, sql, q_type, q_source = run_query(filtered_df, schema, question)
-                st.session_state.last_result = result
-                st.session_state.last_sql = sql
-                st.session_state.last_query_type = q_type
-                st.session_state.last_query_source = q_source
+                is_valid_query, invalid_message = validate_question_columns(
+                    processed_question,
+                    filtered_df,
+                    schema.get("column_aliases", {}),
+                    query_language="en",
+                )
+                if is_valid_query:
+                    result, sql, q_type, q_source = run_query(
+                        filtered_df,
+                        schema,
+                        processed_question,
+                    )
+                    st.session_state.last_result = result
+                    st.session_state.last_sql = sql
+                    st.session_state.last_query_type = q_type
+                    st.session_state.last_query_source = q_source
+                    st.session_state.last_query_invalid = False
+                    st.session_state.last_invalid_message = ""
+                else:
+                    st.session_state.last_result = None
+                    st.session_state.last_sql = "-- INVALID QUERY --"
+                    st.session_state.last_query_type = "invalid"
+                    st.session_state.last_query_source = "validation"
+                    st.session_state.last_query_invalid = True
+                    st.session_state.last_invalid_message = invalid_message
             else:
-                st.session_state.last_result = filtered_df.head(500)
+                st.session_state.last_result = dashboard_source
                 st.session_state.last_sql = "SELECT * FROM dataframe LIMIT 500"
                 st.session_state.last_query_type = "dashboard"
                 st.session_state.last_query_source = "auto_dashboard"
+                st.session_state.last_query_invalid = False
+                st.session_state.last_invalid_message = ""
 
             st.session_state.chat_history.append(
                 {
@@ -801,136 +1780,132 @@ if df is not None:
                     "source": st.session_state.last_query_source,
                 }
             )
+            set_current_page("Output")
+            st.rerun()
 
-        if st.session_state.last_result is not None:
-            dashboard_source = st.session_state.last_result
+        st.info("Enter a prompt and run query. App will auto-open the Output page.")
 
-        charts = build_dashboard_charts(dashboard_source)
-
-        render_kpis(dashboard_source)
-        st.caption(
-            f"Query type: `{st.session_state.last_query_type}` | "
-            f"SQL source: `{st.session_state.last_query_source}`"
-        )
-        st.subheader("Generated SQL")
-        st.code(st.session_state.last_sql)
-        st.subheader("Charts")
-        st.subheader("Chart Row 1")
-        c1, c2 = st.columns(2)
-        with c1:
-            if charts["bar"] is not None:
-                st.plotly_chart(style_chart(charts["bar"]), use_container_width=True)
-            else:
-                st.info("Bar chart not available.")
-        with c2:
-            if charts["line"] is not None:
-                styled_line = style_chart(charts["line"])
-                styled_line.update_traces(line=dict(color="#22c55e", width=3))
-                st.plotly_chart(styled_line, use_container_width=True)
-            else:
-                st.info("Line chart not available.")
-
-        st.subheader("Chart Row 2")
-        c3, c4 = st.columns(2)
-        with c3:
-            if charts["pie"] is not None:
-                styled_pie = style_chart(charts["pie"])
-                styled_pie.update_traces(
-                    marker=dict(
-                        colors=["#f59e0b", "#60a5fa", "#34d399", "#f472b6", "#a78bfa"]
-                    )
+    elif current_page == "Output":
+        dashboard_source = df.head(500)
+        query_entered = bool(str(st.session_state.last_user_query).strip())
+        if not query_entered:
+            st.session_state.page_notice = "Run a prompt from Input first, then the app will open Output automatically."
+            set_current_page("Input")
+            st.rerun()
+        else:
+            if st.session_state.last_result is not None:
+                dashboard_source = st.session_state.last_result
+            output_filter_config = None
+            if st.session_state.last_query_type == "dashboard":
+                output_filter_config = detect_output_filter_config(dashboard_source)
+                output_filter_context = _result_signature(
+                    dashboard_source.head(200), st.session_state.last_sql
                 )
-                st.plotly_chart(styled_pie, use_container_width=True)
-            else:
-                st.info("Pie chart not available.")
-        with c4:
-            if charts["scatter"] is not None:
-                styled_scatter = style_chart(charts["scatter"])
-                styled_scatter.update_traces(
-                    marker=dict(color="#f59e0b", size=10, opacity=0.8)
+                sync_output_filter_state(
+                    st.session_state, output_filter_context, output_filter_config
                 )
-                st.plotly_chart(styled_scatter, use_container_width=True)
+                dashboard_source = apply_output_filters(
+                    dashboard_source, output_filter_config, st.session_state
+                )
+
+            output_schema = get_cached_schema(dashboard_source, rename_map, "output_page")
+            output_profile, _ = infer_dashboard_profile(dashboard_source, output_schema)
+            palette = _profile_palette(output_profile)
+
+            if st.session_state.last_query_invalid:
+                st.error(st.session_state.last_invalid_message or "Invalid query.")
+                charts = {"bar": None, "line": None, "pie": None, "scatter": None}
+            elif dashboard_source.empty:
+                st.warning("No rows match the selected dashboard filters.")
+                charts = {"bar": None, "line": None, "pie": None, "scatter": None}
             else:
-                st.info("Scatter chart not available.")
+                charts = get_cached_dashboard_charts(
+                    dashboard_source, st.session_state.last_sql
+                )
+            if st.session_state.last_query_invalid:
+                st.warning("AI insights are blocked for invalid queries.")
+                st.session_state.last_explanation = "Invalid query: AI insights blocked."
+                chart_explanations = {}
+                chart_summaries = []
+                trend_insights = []
+                strategic_insights = []
+                current_expl_key = _result_signature(dashboard_source.head(200), st.session_state.last_sql)
+            elif dashboard_source.empty:
+                chart_explanations = {}
+                chart_summaries = []
+                trend_insights = []
+                strategic_insights = []
+                st.session_state.last_explanation = "No rows match the selected dashboard filters."
+                current_expl_key = _result_signature(dashboard_source.head(200), st.session_state.last_sql)
+            else:
+                analysis_bundle = get_output_analysis_bundle(
+                    dashboard_source, st.session_state.last_sql
+                )
+                chart_explanations = analysis_bundle["chart_explanations"]
+                chart_summaries = analysis_bundle["chart_summaries"]
+                trend_insights = analysis_bundle["trend_insights"]
+                strategic_insights = analysis_bundle["strategic_insights"]
+                current_expl_key = analysis_bundle["key"]
+                if st.session_state.last_explanation_key != current_expl_key:
+                    st.session_state.last_explanation = analysis_bundle["last_explanation"]
+                    st.session_state.last_explanation_key = current_expl_key
+                elif not st.session_state.last_explanation:
+                    st.session_state.last_explanation = analysis_bundle["last_explanation"]
 
-        st.subheader("AI Chart Explanation")
-        explanation_source = dashboard_source
-        if explanation_source is None or explanation_source.empty:
-            explanation_source = filtered_df
-        analysis_frame = prepare_analysis_frame(explanation_source)
-        chart_explanations = explain_all_charts(analysis_frame)
-        trend_insights = generate_trend_insights(analysis_frame)
-        current_expl_key = _result_signature(
-            analysis_frame.head(200), st.session_state.last_sql
-        )
-        if st.session_state.last_explanation_key != current_expl_key:
-            st.session_state.last_explanation = ""
-            st.session_state.last_explanation_key = current_expl_key
-
-        if not st.session_state.last_explanation:
-            st.session_state.last_explanation = (
-                " ".join(trend_insights)
-                if trend_insights
-                else "Explanation is unavailable right now."
+            reset_analysis_chat(current_expl_key)
+            translated_chart_summaries = bilingual_list(
+                chart_summaries,
+                st.session_state.last_user_language_code,
+                st.session_state.last_user_language_name,
             )
-        st.caption("Explanation is generated from a fast sample of the current result and cached per query.")
+            translated_strategic_insights = bilingual_list(
+                strategic_insights or trend_insights,
+                st.session_state.last_user_language_code,
+                st.session_state.last_user_language_name,
+            )
 
-        with st.expander("Open AI Explanation", expanded=True):
-            chart_labels = {
-                "bar": "Bar Chart",
-                "line": "Line Chart",
-                "pie": "Pie Chart",
-                "scatter": "Scatter Chart",
-            }
-            for key in ("bar", "line", "pie", "scatter"):
-                st.markdown(f"**{chart_labels[key]}:**")
-                st.write(chart_explanations.get(key, "Explanation is unavailable right now."))
+            render_user_prompt_panel(st.session_state.last_user_query)
+            st.caption(f"Output style: `{output_profile}`")
+            render_kpis(dashboard_source)
+            render_fixed_dashboard_layout(
+                dashboard_source=dashboard_source,
+                charts=charts,
+                output_profile=output_profile,
+                palette=palette,
+                translated_chart_summaries=translated_chart_summaries,
+                translated_strategic_insights=translated_strategic_insights,
+                is_invalid_query=st.session_state.last_query_invalid,
+                style_chart=style_chart,
+            )
+            st.markdown('<div class="section-panel">', unsafe_allow_html=True)
+            st.subheader("Download Output")
+            render_download_actions(dashboard_source, charts, "output_bottom")
+            st.markdown("</div>", unsafe_allow_html=True)
 
-            st.markdown("**Trend Insights**")
-            if trend_insights:
-                for insight in trend_insights:
-                    st.markdown(f"- {insight}")
+    else:
+        dashboard_source = df.head(500)
+        query_entered = bool(str(st.session_state.last_user_query).strip())
+        if not query_entered:
+            st.session_state.page_notice = "Run a prompt from Input first to enable downloads."
+            set_current_page("Input")
+            st.rerun()
+        else:
+            if st.session_state.last_result is not None:
+                dashboard_source = st.session_state.last_result
+            if st.session_state.last_query_invalid:
+                charts = {"bar": None, "line": None, "pie": None, "scatter": None}
             else:
-                st.write("Trend insights are unavailable right now.")
-
-            st.markdown("**Overall Summary**")
-            st.write(st.session_state.last_explanation)
-
-    with download_tab:
-        dashboard_source = filtered_df.head(500)
-        if st.session_state.last_result is not None:
-            dashboard_source = st.session_state.last_result
-        charts = build_dashboard_charts(dashboard_source)
-        st.subheader("Generated SQL")
-        st.code(st.session_state.last_sql)
-        st.subheader("Download Dashboard With Result")
-        csv_bytes = dashboard_source.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            "Download Results",
-            data=csv_bytes,
-            file_name="dashboard_results.csv",
-            mime="text/csv",
-            type="primary",
-        )
-        dashboard_html = build_dashboard_html(
-            charts=charts,
-            explanation=st.session_state.last_explanation,
-            sql=st.session_state.last_sql,
-            query_type=st.session_state.last_query_type,
-            query_source=st.session_state.last_query_source,
-            data_preview=dashboard_source,
-            user_query=st.session_state.last_user_query,
-        ).encode("utf-8")
-        st.download_button(
-            "Download Dashboard (HTML)",
-            data=dashboard_html,
-            file_name="dashboard_report.html",
-            mime="text/html",
-            type="primary",
-        )
-        st.dataframe(dashboard_source.head(100), use_container_width=True)
+                charts = get_cached_dashboard_charts(
+                    dashboard_source, st.session_state.last_sql
+                )
+            st.subheader("Generated SQL")
+            st.code(st.session_state.last_sql)
+            st.subheader("Download Dashboard With Result")
+            render_download_actions(dashboard_source, charts, "download_page")
+            st.dataframe(dashboard_source.head(100), use_container_width=True)
 else:
     st.warning(
         "Upload a dataset or place the default customer behaviour CSV at "
         f"`{DEFAULT_DATASET_PATH}` to run queries."
     )
+

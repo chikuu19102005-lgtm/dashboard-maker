@@ -99,6 +99,10 @@ def _best_scatter_pair(df, numeric_cols):
     return tuple(numeric_cols[:2])
 
 
+def _fallback_numeric_columns(df):
+    return list(df.select_dtypes(include="number").columns)
+
+
 def create_charts(df, question="", chart_style="auto", query_type="table"):
     charts = []
     dashboard_charts = build_dashboard_charts(df)
@@ -116,6 +120,9 @@ def build_dashboard_charts(df):
     data = df.copy().reset_index(drop=True)
     category_col = _pick_category_column(data)
     numeric_cols = _rank_numeric_columns(data)
+    all_numeric_cols = _fallback_numeric_columns(data)
+    if not numeric_cols and all_numeric_cols:
+        numeric_cols = all_numeric_cols[:]
 
     bar_fig = None
     if category_col and numeric_cols:
@@ -126,6 +133,15 @@ def build_dashboard_charts(df):
             y=numeric_cols[0],
             color=category_col,
             title=f"Average {numeric_cols[0].replace('_', ' ')} by {category_col.replace('_', ' ')}",
+        )
+    elif category_col:
+        counts = _top_categories(data[category_col])
+        bar_fig = px.bar(
+            counts,
+            x="category",
+            y="count",
+            color="category",
+            title=f"{category_col.replace('_', ' ')} counts",
         )
     elif numeric_cols:
         top_values = data[numeric_cols[0]].dropna().head(25).reset_index(drop=True)
@@ -152,6 +168,24 @@ def build_dashboard_charts(df):
             markers=True,
             title=f"{numeric_cols[0].replace('_', ' ')} vs {numeric_cols[1].replace('_', ' ')} by {category_col.replace('_', ' ')}",
         )
+    elif category_col and numeric_cols:
+        line_df = _grouped_mean(data, category_col, numeric_cols[0])
+        line_fig = px.line(
+            line_df,
+            x=category_col,
+            y=numeric_cols[0],
+            markers=True,
+            title=f"{numeric_cols[0].replace('_', ' ')} by {category_col.replace('_', ' ')}",
+        )
+    elif category_col:
+        counts = _top_categories(data[category_col])
+        line_fig = px.line(
+            counts,
+            x="category",
+            y="count",
+            markers=True,
+            title=f"{category_col.replace('_', ' ')} counts",
+        )
     elif numeric_cols:
         line_df = data[numeric_cols[:1]].dropna().head(150).copy()
         line_df["row_id"] = range(1, len(line_df) + 1)
@@ -172,9 +206,19 @@ def build_dashboard_charts(df):
             title=f"{category_col.replace('_', ' ')} distribution",
         )
     elif numeric_cols:
-        bucketed = pd.cut(data[numeric_cols[0]], bins=5, duplicates="drop").astype(str)
-        counts = bucketed.value_counts().reset_index()
-        counts.columns = ["category", "count"]
+        series = data[numeric_cols[0]].dropna()
+        if len(series) >= 2 and series.nunique() > 1:
+            bucketed = pd.cut(series, bins=5, duplicates="drop").astype(str)
+            counts = bucketed.value_counts().reset_index()
+            counts.columns = ["category", "count"]
+        else:
+            value = float(series.iloc[0]) if len(series) else 0.0
+            counts = pd.DataFrame(
+                {
+                    "category": [numeric_cols[0].replace("_", " ")],
+                    "count": [value if value > 0 else 1.0],
+                }
+            )
         pie_fig = px.pie(
             counts,
             names="category",
@@ -194,5 +238,24 @@ def build_dashboard_charts(df):
         if category_col:
             scatter_kwargs["color"] = category_col
         scatter_fig = px.scatter(data, **scatter_kwargs)
+    elif numeric_cols:
+        scatter_df = data[[numeric_cols[0]]].dropna().head(150).copy()
+        scatter_df["row_id"] = range(1, len(scatter_df) + 1)
+        scatter_fig = px.scatter(
+            scatter_df,
+            x="row_id",
+            y=numeric_cols[0],
+            title=f"{numeric_cols[0].replace('_', ' ')} across records",
+        )
+    elif category_col:
+        counts = _top_categories(data[category_col])
+        counts["row_id"] = range(1, len(counts) + 1)
+        scatter_fig = px.scatter(
+            counts,
+            x="row_id",
+            y="count",
+            color="category",
+            title=f"{category_col.replace('_', ' ')} counts",
+        )
 
     return {"bar": bar_fig, "line": line_fig, "pie": pie_fig, "scatter": scatter_fig}

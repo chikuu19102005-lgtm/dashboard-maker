@@ -2,6 +2,14 @@ import re
 
 
 SQL_STARTERS = ("select", "with", "show", "describe")
+SEMANTIC_GROUPS = [
+    {"sale", "sales", "revenue", "income", "spend", "amount", "balance", "price", "cost"},
+    {"order", "orders", "count", "counts", "frequency", "visits", "transactions"},
+    {"customer", "customers", "client", "clients", "user", "users", "people", "person"},
+    {"internet", "online", "digital", "web"},
+    {"social", "media", "engagement"},
+    {"month", "monthly", "months"},
+]
 
 
 def extract_sql(text):
@@ -30,6 +38,8 @@ def detect_query_type(question):
         return "top"
     if any(k in q for k in ["average", "avg", "mean"]):
         return "average"
+    if any(k in q for k in ["total", "sum", "overall"]):
+        return "total"
     if any(k in q for k in ["trend", "over time"]):
         return "trend"
     return "table"
@@ -52,6 +62,10 @@ def _column_score(col, q_tokens, q_lower, aliases=None):
     for candidate in candidates:
         parts = [p for p in re.split(r"[_\W]+", candidate) if len(p) >= 3]
         score += sum(1 for p in parts if p in q_tokens)
+        for part in parts:
+            for group in SEMANTIC_GROUPS:
+                if part in group and any(token in group for token in q_tokens):
+                    score += 2
     return score
 
 
@@ -103,6 +117,16 @@ def build_fallback_sql(question, df, column_aliases=None):
             )
         return f'SELECT AVG("{metric}") AS avg_{metric} FROM dataframe'
 
+    if query_type == "total" and (matched_numeric or numeric_cols):
+        metric = matched_numeric[0] if matched_numeric else numeric_cols[0]
+        if matched_category and any(k in q for k in ["by", "per", "each"]):
+            group_col = matched_category[0]
+            return (
+                f'SELECT "{group_col}", SUM("{metric}") AS total_{metric} '
+                f'FROM dataframe GROUP BY "{group_col}" ORDER BY total_{metric} DESC LIMIT 20'
+            )
+        return f'SELECT SUM("{metric}") AS total_{metric} FROM dataframe'
+
     if query_type == "compare":
         compare_cols = matched_numeric[:2]
         if len(compare_cols) < 2:
@@ -117,3 +141,44 @@ def build_fallback_sql(question, df, column_aliases=None):
     if query_type == "trend":
         return f"SELECT {select_list} FROM dataframe LIMIT 300"
     return f"SELECT {select_list} FROM dataframe LIMIT 100"
+
+
+def validate_question_columns(question, df, column_aliases=None, query_language="en"):
+    q = (question or "").strip()
+    if not q:
+        return False, "Invalid query: question is empty."
+
+    if str(query_language).lower() != "en":
+        return True, ""
+
+    q_lower = q.lower()
+    q_tokens = _question_tokens(q)
+    column_aliases = column_aliases or {}
+    columns = list(df.columns)
+    numeric_cols = list(df.select_dtypes(include="number").columns)
+
+    ranked = sorted(
+        columns,
+        key=lambda c: _column_score(c, q_tokens, q_lower, column_aliases),
+        reverse=True,
+    )
+    matched = [c for c in ranked if _column_score(c, q_tokens, q_lower, column_aliases) > 0]
+    matched_numeric = [c for c in matched if c in numeric_cols]
+    query_type = detect_query_type(q)
+
+    if not matched:
+        if query_type == "trend" and numeric_cols:
+            return True, ""
+        if query_type == "table" and columns:
+            return True, ""
+        return False, "Invalid query: requested field is not present in the dataset."
+
+    if query_type == "compare" and len(matched_numeric) < 2:
+        return False, "Invalid query: comparison needs two numeric fields from the dataset."
+
+    if query_type in {"average", "top", "total"} and not matched_numeric:
+        if numeric_cols:
+            return True, ""
+        return False, "Invalid query: numeric metric is not present in the dataset."
+
+    return True, ""

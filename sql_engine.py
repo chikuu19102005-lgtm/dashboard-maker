@@ -1,9 +1,10 @@
 import requests
 import os
+from functools import lru_cache
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
-OLLAMA_CONNECT_TIMEOUT = float(os.getenv("OLLAMA_CONNECT_TIMEOUT", "5"))
-OLLAMA_READ_TIMEOUT = float(os.getenv("OLLAMA_READ_TIMEOUT", "120"))
+OLLAMA_CONNECT_TIMEOUT = float(os.getenv("OLLAMA_CONNECT_TIMEOUT", "1.5"))
+OLLAMA_READ_TIMEOUT = float(os.getenv("OLLAMA_READ_TIMEOUT", "12"))
 
 
 def _ask_ollama(prompt):
@@ -39,8 +40,8 @@ def _schema_text(schema):
     )
 
 
-def generate_sql(question, schema):
-    schema_block = _schema_text(schema)
+@lru_cache(maxsize=128)
+def _generate_sql_cached(question, schema_block):
     prompt = f"""
 You convert natural language to DuckDB SQL.
 Return SQL only.
@@ -51,6 +52,8 @@ Dataset structure:
 Rules:
 - Table name is dataframe
 - Use DuckDB syntax
+- The user question may be written in English, Hindi, Bengali, Tamil, Telugu, Marathi, Gujarati, Punjabi, Kannada, Spanish, French, German, Chinese, Arabic, Japanese, or Malayalam
+- Understand the user's language and translate the request internally before writing SQL
 - Use only exact column names from all_columns
 - Users may refer to columns by their original names listed in column_aliases; map those to the exact normalized names in all_columns
 - Never invent columns (for example: timestamp, date, datetime, created_at)
@@ -63,8 +66,13 @@ Question:
     return _ask_ollama(prompt)
 
 
-def repair_sql(question, schema, bad_sql, error_message):
+def generate_sql(question, schema):
     schema_block = _schema_text(schema)
+    return _generate_sql_cached(question, schema_block)
+
+
+@lru_cache(maxsize=128)
+def _repair_sql_cached(question, schema_block, bad_sql, error_message):
     prompt = f"""
 Fix this DuckDB SQL query. Return corrected SQL only.
 
@@ -83,9 +91,15 @@ Error:
 Rules:
 - Table name is dataframe
 - Use DuckDB syntax
+- The user question may be written in English or another supported language; interpret it correctly before fixing the SQL
 - Use only exact column names from all_columns
 - Users may refer to columns by their original names listed in column_aliases; map those to the exact normalized names in all_columns
 - Never invent columns
 - Do not nest aggregates
 """
     return _ask_ollama(prompt)
+
+
+def repair_sql(question, schema, bad_sql, error_message):
+    schema_block = _schema_text(schema)
+    return _repair_sql_cached(question, schema_block, bad_sql, error_message)
